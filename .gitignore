@@ -6,7 +6,6 @@
 *.profraw
 *.profdata
 bin/*
-formal-analysis/*
 self
 sodium
 donna
