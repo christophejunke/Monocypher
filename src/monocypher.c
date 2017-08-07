@@ -153,16 +153,14 @@ static u8 chacha20_pool_byte(crypto_chacha_ctx *ctx)
 // Fill the pool if needed, update the counters
 static void chacha20_refill_pool(crypto_chacha_ctx *ctx)
 {
-    if (ctx->pool_idx == 64) {
-        chacha20_rounds(ctx->pool, ctx->input);
-        FOR (j, 0, 16) {
-            ctx->pool[j] += ctx->input[j];
-        }
-        ctx->pool_idx = 0;
-        ctx->input[12]++;
-        if (ctx->input[12] == 0) {
-            ctx->input[13]++;
-        }
+    chacha20_rounds(ctx->pool, ctx->input);
+    FOR (j, 0, 16) {
+        ctx->pool[j] += ctx->input[j];
+    }
+    ctx->pool_idx = 0;
+    ctx->input[12]++;
+    if (ctx->input[12] == 0) {
+        ctx->input[13]++;
     }
 }
 
@@ -213,8 +211,8 @@ void crypto_chacha20_encrypt(crypto_chacha_ctx *ctx,
                              const u8          *plain_text,
                              size_t             text_size)
 {
-    // Align ourselves with 4 byte words
-    while (ctx->pool_idx % 4 != 0 && text_size > 0) {
+    // Align ourselves with a block
+    while (ctx->pool_idx % 64 != 0 && text_size > 0) {
         u8 stream = chacha20_pool_byte(ctx);
         u8 plain  = 0;
         if (plain_text != 0) {
@@ -225,23 +223,33 @@ void crypto_chacha20_encrypt(crypto_chacha_ctx *ctx,
         text_size--;
         cipher_text++;
     }
-    // Main processing by 4 byte chunks
-    size_t nb_words  = text_size / 4;
-    size_t remainder = text_size % 4;
-    FOR (i, 0, nb_words) {
+    // Main processing by 64 byte chunks
+    size_t nb_blocks = text_size / 64;
+    size_t remainder = text_size % 64;
+    FOR (i, 0, nb_blocks) {
         chacha20_refill_pool(ctx);
-        u32 txt = 0;
-        if (plain_text) {
-            txt = load32_le(plain_text);
-            plain_text += 4;
+        u32 txt[16];
+        FOR (j, 0, 16) {
+            if (plain_text) {
+                txt[j] = load32_le(plain_text);
+                plain_text += 4;
+            } else {
+                txt[j] = 0;
+            }
         }
-        store32_le(cipher_text, ctx->pool[ctx->pool_idx / 4] ^ txt);
-        cipher_text   += 4;
-        ctx->pool_idx += 4;
+        FOR (j, 0, 16) {
+            store32_le(cipher_text + j * 4, ctx->pool[j] ^ txt[j]);
+        }
+        cipher_text += 64;
+    }
+    if (nb_blocks > 0) {
+        ctx->pool_idx = 64;
     }
     // Remaining input, byte by byte
     FOR (i, 0, remainder) {
-        chacha20_refill_pool(ctx);
+        if (ctx->pool_idx == 64) {
+            chacha20_refill_pool(ctx);
+        }
         u8 stream = chacha20_pool_byte(ctx);
         u8 plain  = 0;
         if (plain_text != 0) {
@@ -316,18 +324,11 @@ static void poly_block(crypto_poly1305_ctx *ctx)
 // (re-)initializes the input counter and input buffer
 static void poly_clear_c(crypto_poly1305_ctx *ctx)
 {
-    FOR (i, 0, 4) {
-        ctx->c[i] = 0;
-    }
+    ctx->c[0]  = 0;
+    ctx->c[1]  = 0;
+    ctx->c[2]  = 0;
+    ctx->c[3]  = 0;
     ctx->c_idx = 0;
-}
-
-static void poly_end_block(crypto_poly1305_ctx *ctx)
-{
-    if (ctx->c_idx == 16) {
-        poly_block(ctx);
-        poly_clear_c(ctx);
-    }
 }
 
 static void poly_take_input(crypto_poly1305_ctx *ctx, u8 input)
@@ -356,27 +357,32 @@ void crypto_poly1305_init(crypto_poly1305_ctx *ctx, const u8 key[32])
 void crypto_poly1305_update(crypto_poly1305_ctx *ctx,
                             const u8 *message, size_t message_size)
 {
-    // Align ourselves with 4 byte words
-    while (ctx->c_idx % 4 != 0 && message_size > 0) {
+    // Align ourselves with a block
+    while (ctx->c_idx % 16 != 0 && message_size > 0) {
         poly_take_input(ctx, *message);
         message++;
         message_size--;
     }
-
-    // Process the input 4 bytes at a time
-    size_t nb_words  = message_size / 4;
-    size_t remainder = message_size % 4;
-    FOR (i, 0, nb_words) {
-        poly_end_block(ctx);
-        ctx->c[ctx->c_idx / 4] = load32_le(message);
-        message    += 4;
-        ctx->c_idx += 4;
+    if (ctx->c_idx == 16) {
+        poly_block(ctx);
+        poly_clear_c(ctx);
+    }
+    // Process the input blok by block
+    size_t nb_blocks = message_size / 16;
+    size_t remainder = message_size % 16;
+    FOR (i, 0, nb_blocks) {
+        ctx->c[0] = load32_le(message +  0);
+        ctx->c[1] = load32_le(message +  4);
+        ctx->c[2] = load32_le(message +  8);
+        ctx->c[3] = load32_le(message + 12);
+        poly_block(ctx);
+        message += 16;
+    }
+    if (nb_blocks > 0) {
+        poly_clear_c(ctx);
     }
 
     // Input the remaining bytes
-    if (remainder != 0) {
-        poly_end_block(ctx);
-    }
     FOR (i, 0, remainder) {
         poly_take_input(ctx, message[i]);
     }
@@ -520,6 +526,13 @@ static void blake2b_end_block(crypto_blake2b_ctx *ctx)
     }
 }
 
+static void blake2b_fill_block(crypto_blake2b_ctx *ctx, const u8 message[128])
+{
+    FOR (j, 0, 16) {
+        ctx->input[j] = load64_le(message + j*8);
+    }
+}
+
 void crypto_blake2b_general_init(crypto_blake2b_ctx *ctx, size_t hash_size,
                                  const u8           *key, size_t key_size)
 {
@@ -550,21 +563,29 @@ void crypto_blake2b_init(crypto_blake2b_ctx *ctx)
 void crypto_blake2b_update(crypto_blake2b_ctx *ctx,
                            const u8 *message, size_t message_size)
 {
-    // Align ourselves with 8 byte words
-    while (ctx->input_idx % 8 != 0 && message_size > 0) {
+    // Align ourselves with blocks
+    while (ctx->input_idx % 128 != 0 && message_size > 0) {
         blake2b_set_input(ctx, *message);
         message++;
         message_size--;
     }
 
-    // Process the input 8 bytes at a time
-    size_t nb_words  = message_size / 8;
-    size_t remainder = message_size % 8;
-    FOR (i, 0, nb_words) {
+    // Process the input one block at a time
+    size_t nb_blocks = message_size / 128;
+    size_t remainder = message_size % 128;
+    if (nb_blocks > 0) {
+        // first block
         blake2b_end_block(ctx);
-        ctx->input[ctx->input_idx / 8] = load64_le(message);
-        message        += 8;
-        ctx->input_idx += 8;
+        blake2b_fill_block(ctx, message);
+        message += 128;
+        ctx->input_idx = 128;
+        // subsequent blocks
+        FOR (i, 0, nb_blocks - 1) {
+            blake2b_incr(ctx);
+            blake2b_compress(ctx, 0);
+            blake2b_fill_block(ctx, message);
+            message += 128;
+        }
     }
 
     // Load the remainder

@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "monocypher.h"
 #include "sha512.h"
 
@@ -18,6 +19,12 @@
 #include "x_chacha20.h"
 
 #define FOR(i, start, end) for (size_t (i) = (start); (i) < (end); (i)++)
+#define CHACHA_BLOCK_SIZE    64
+#define CHACHA_NB_BLOCKS     10
+#define POLY1305_BLOCK_SIZE  16
+#define BLAKE2B_BLOCK_SIZE  128
+#define SHA_512_BLOCK_SIZE  128
+#define COMPARISON_DIFF_THRESHOLD  4
 typedef  int8_t   i8;
 typedef uint8_t   u8;
 typedef uint32_t u32;
@@ -286,14 +293,59 @@ static u64 rand64()
 }
 
 
+// Tests that constant-time comparison is actually constant-time.
+static int test_cmp()
+{
+    u8 va[1024 * 64] = {0};
+    u8 vb[1024 * 64] = {0};
+    clock_t t1, t2, d;
+    int status = 0;
+
+    t1 = clock();
+    status |= (crypto_memcmp(va, vb, sizeof(va)) != 0);
+    t2 = clock();
+    d = t2 - t1;
+
+    p_random(vb, sizeof(vb));
+
+    t1 = clock();
+    status |= (crypto_memcmp(va, vb, sizeof(va)) == 0);
+    t2 = clock();
+    d = d - (t2 - t1);
+
+    d = (d < 0 ? -d : d);
+    status |= (d > COMPARISON_DIFF_THRESHOLD);
+
+    printf("%s: memcmp\n", status != 0 ? "FAILED" : "OK");
+
+    t1 = clock();
+    status |= (crypto_zerocmp(va, sizeof(va)) != 0);
+    t2 = clock();
+    d = t2 - t1;
+
+    p_random(vb, sizeof(vb));
+
+    t1 = clock();
+    status |= (crypto_zerocmp(vb, sizeof(vb)) == 0);
+    t2 = clock();
+    d = d - (t2 - t1);
+
+    d = (d < 0 ? -d : d);
+    status |= (d > COMPARISON_DIFF_THRESHOLD);
+
+    printf("%s: zerocmp\n", status != 0 ? "FAILED" : "OK");
+
+    return status;
+}
 
 // Tests that encrypting in chunks yields the same result than
 // encrypting all at once.
 static int p_chacha20()
 {
-    static const size_t block_size = 64;             // Chacha Block size
-    static const size_t input_size = block_size * 4; // total input size
-    static const size_t c_max_size = block_size * 2; // maximum chunk size
+    // total input size
+    static const size_t input_size = CHACHA_BLOCK_SIZE * 4;
+    // maximum chunk size
+    static const size_t c_max_size = CHACHA_BLOCK_SIZE * 2;
     int status = 0;
     FOR (i, 0, 1000) {
         size_t offset = 0;
@@ -329,9 +381,7 @@ static int p_chacha20()
 
 static int p_chacha20_set_ctr()
 {
-    static const size_t nb_blocks   = 10;
-    static const size_t block_size  = 64;
-    static const size_t stream_size = block_size * nb_blocks;
+    static const size_t stream_size = CHACHA_BLOCK_SIZE * CHACHA_NB_BLOCKS;
     int status = 0;
     FOR (i, 0, 1000) {
         u8 output_part[stream_size    ];
@@ -339,8 +389,8 @@ static int p_chacha20_set_ctr()
         u8 output_more[stream_size * 2];
         u8 key        [32];          p_random(key  , 32);
         u8 nonce      [8];           p_random(nonce, 8 );
-        size_t ctr   = rand64() % nb_blocks;
-        size_t limit = ctr * block_size;
+        size_t ctr   = rand64() % CHACHA_NB_BLOCKS;
+        size_t limit = ctr * CHACHA_BLOCK_SIZE;
         // Encrypt all at once
         crypto_chacha_ctx ctx;
         crypto_chacha20_init(&ctx, key, nonce);
@@ -372,9 +422,10 @@ static int p_chacha20_set_ctr()
 // authenticating all at once
 static int p_poly1305()
 {
-    static const size_t block_size = 16;             // poly1305 block size
-    static const size_t input_size = block_size * 4; // total input size
-    static const size_t c_max_size = block_size * 2; // maximum chunk size
+    // total input size
+    static const size_t input_size = POLY1305_BLOCK_SIZE * 4;
+    // maximum chunk size
+    static const size_t c_max_size = POLY1305_BLOCK_SIZE * 2;
     int status = 0;
     FOR (i, 0, 1000) {
         size_t offset = 0;
@@ -412,9 +463,10 @@ static int p_poly1305()
 // interface.
 static int p_blake2b()
 {
-    static const size_t block_size = 128;            // Blake2b block size
-    static const size_t input_size = block_size * 4; // total input size
-    static const size_t c_max_size = block_size * 2; // maximum chunk size
+    // total input size
+    static const size_t input_size = BLAKE2B_BLOCK_SIZE * 4;
+    // maximum chunk size
+    static const size_t c_max_size = BLAKE2B_BLOCK_SIZE * 2;
     int status = 0;
     FOR (i, 0, 1000) {
         size_t offset = 0;
@@ -449,9 +501,10 @@ static int p_blake2b()
 // at once. (for sha512)
 static int p_sha512()
 {
-    static const size_t block_size = 128;            // Blake2b block size
-    static const size_t input_size = block_size * 4; // total input size
-    static const size_t c_max_size = block_size * 2; // maximum chunk size
+    // total input size
+    static const size_t input_size = SHA_512_BLOCK_SIZE * 4;
+    // maximum chunk size
+    static const size_t c_max_size = SHA_512_BLOCK_SIZE * 2;
     int status = 0;
     FOR (i, 0, 1000) {
         size_t offset = 0;
@@ -545,6 +598,10 @@ int main(void)
     status |= p_blake2b();
     status |= p_sha512();
     status |= p_aead();
+
+    printf("\nConstant time tests");
+    printf("\n-------------------\n");
+    status |= test_cmp();
 
     return status;
 }

@@ -19,6 +19,13 @@ just copy `src/monocypher.h` and `src/monocypher.c` into your project.
 They compile as C99, C11, C++98, C++11, C++14, and C++17. (Tested with
 gcc 5.4.0 and clang 2.8.0 on GNU/Linux.)
 
+### Language bindings
+
+So far, I am aware of bindings for the following languages:
+
+* [Crystal](https://github.com/konovod/monocypher.cr)
+
+
 Test suite
 ----------
 
@@ -27,8 +34,8 @@ Test suite
 
 It should display a nice printout of all the tests, all starting with
 "OK".  If you see "FAILURE" anywhere, something has gone very wrong
-somewhere.  Note: the fuzz tests depend on libsodium.  Install it
-before you run them.
+somewhere.  Note: the fuzz tests depend on libsodium 1.0.12 or above.
+Install it before you run them.
 
 To run only the self contained tests, run
 
